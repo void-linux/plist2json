@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2015 Juan Romero Pardines.
+ * Copyright (c) 2015, 2020 Juan Romero Pardines <xtraeme@gmail.com>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -29,38 +29,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <xbps.h>
+#include <limits.h>
+#include <ctype.h>
+
+#include <prop/proplib.h>
 
 #include "defs.h"
 
-#define STRING_ALLOC_INCREMENTS	4096
-#define INDENT_INITIAL_SPACES	2
-
-static char	*indent_spaces = NULL;
-static size_t	indent_current_spaces = 0;
-static int	indent_level = 0;
+static size_t indent_blanks = 0;
+static bool compact_mode = false;
 
 static void
-err_usage(const char *cmd)
+usage(const char *cmd)
 {
-	(void)fprintf(stderr, "Usage: %s [ <file.plist> | - ]\n", cmd);
-	exit(EXIT_FAILURE);
-}
-
-static void
-err_invalid(const char *cmd, const char *file)
-{
-	if (file != NULL) {
-		if (errno != 0) {
-			fprintf(stderr, "%s", file);
-			exit(EXIT_FAILURE);
-		} else {
-			(void)fprintf(stderr,
-			    "%s: %s: Not a valid property list\n", cmd, file);
-		}
-	} else
-		(void)fprintf(stderr, "%s: stdin: Not a valid property list\n",
-		    cmd);
+	fprintf(stderr, "Usage: %s [-c] [ <file.plist> | - ]\n", cmd);
 	exit(EXIT_FAILURE);
 }
 
@@ -69,24 +51,27 @@ string_read(int fd)
 {
 	char *str, *ptr, *tptr;
 
-	if ((str = malloc(STRING_ALLOC_INCREMENTS)) == NULL)
+	if ((str = malloc(BUFSIZ)) == NULL) {
 		perror("malloc");
+	}
 
-	for (ptr = str, tptr = &str[STRING_ALLOC_INCREMENTS];;) {
+	for (ptr = str, tptr = &str[BUFSIZ];;) {
 		ssize_t	len;
 
-		if ((len = read(fd, ptr, (tptr - ptr) - 1)) == -1)
+		if ((len = read(fd, ptr, (tptr - ptr) - 1)) == -1) {
 			perror("read");
-		else if (len == 0)
+		} else if (len == 0) {
 			break;
+		}
 
 		ptr += len;
 		if (ptr == tptr - 1) {
 			char 	*nstr;
 
-			tptr += STRING_ALLOC_INCREMENTS;
-			if ((nstr = realloc(str, tptr - str)) == NULL)
+			tptr += BUFSIZ;
+			if ((nstr = realloc(str, tptr - str)) == NULL) {
 				perror("realloc");
+			}
 			if (nstr != str) {
 				tptr = &nstr[tptr - str];
 				ptr = &nstr[ptr - str];
@@ -100,158 +85,179 @@ string_read(int fd)
 }
 
 static void
-indent_init(void)
+indent(void)
 {
-	if ((indent_spaces = malloc(INDENT_INITIAL_SPACES)) == NULL)
-		perror("malloc");
+	if (compact_mode || indent_blanks >= SIZE_MAX)
+		return;
 
-	(void)memset(indent_spaces, ' ', INDENT_INITIAL_SPACES);
-	indent_level = 0;
-	indent_current_spaces = INDENT_INITIAL_SPACES;
+	for (size_t i = 0; i < indent_blanks; i++)
+		printf(" ");
 }
 
 static void
-indent_write(int i)
+parse(prop_object_t obj, prop_object_t parent)
 {
-	if (i > indent_current_spaces) {
-		while ((indent_current_spaces *= 1) < i)
-			;
-		if ((indent_spaces = realloc(indent_spaces,
-		    indent_current_spaces)) == NULL)
-			perror("realloc");
-		(void)memset(indent_spaces, ' ', indent_current_spaces);
-	}
-	(void)printf("\n");
-	if (fwrite(indent_spaces, 1, i, stdout) != i)
-		perror("fwrite");
-}
+	prop_type_t type;
 
-static void
-object_out(xbps_object_t obj, xbps_object_t parent)
-{
-	xbps_type_t type;
-
-	type = xbps_object_type(obj);
+	type = prop_object_type(obj);
 	switch (type) {
-	case XBPS_TYPE_BOOL:
-		(void)printf("%s", (xbps_bool_true(obj) ? "true" : "false"));
+	case PROP_TYPE_BOOL:
+		printf("%s", (prop_bool_true(obj) ? "true" : "false"));
 		break;
-	case XBPS_TYPE_NUMBER:
-		if (xbps_number_unsigned(obj)) {
-			uint64_t i = xbps_number_unsigned_integer_value(obj);
-
-			(void)printf("%ju", i);
+	case PROP_TYPE_NUMBER:
+		if (prop_number_unsigned(obj)) {
+			printf("%ju", prop_number_unsigned_integer_value(obj));
 		} else {
-			int64_t i = xbps_number_integer_value(obj);
-
-			(void)printf("%jd", i);
+			printf("%jd", prop_number_integer_value(obj));
 		}
 		break;
-	case XBPS_TYPE_STRING:
-		(void)printf("\"%s\"", xbps_string_cstring_nocopy(obj));
+	case PROP_TYPE_STRING:
+		{
+			size_t len = prop_string_size(obj);
+			char *str = prop_string_cstring(obj);
+			const char *strconst = prop_string_cstring_nocopy(obj);
+			size_t c = 0;
+
+			for (size_t i = 0; i < len; i++) {
+				if (iscntrl(strconst[i])) {
+					continue;
+				}
+				str[c++] = strconst[i];
+			}
+			str[c] = '\0';
+			printf("\"%s\"", str);
+			free(str);
+		}
 		break;
-	case XBPS_TYPE_DATA:
+	case PROP_TYPE_DATA:
 		{
 			size_t len;
-			(void)printf("\"%s\"", base64_encode(xbps_data_data_nocopy(obj), xbps_data_size(obj), &len));
+			printf("\"%s\"", base64_encode(prop_data_data_nocopy(obj), prop_data_size(obj), &len));
 		}
-#if 0
-		(void)printf("\"0x");
-		{
-			size_t		i, len;
-			const uint8_t	*ptr;
-
-			for (i = 0, len = xbps_data_size(obj),
-			    ptr = xbps_data_data_nocopy(obj);
-			    i < len; i++)
-				(void)printf("%02x", ptr[i]);
-		}
-		(void)printf("\"");
-#endif
 		break;
-	case XBPS_TYPE_ARRAY:
-		(void)printf("[ ");
+	case PROP_TYPE_ARRAY:
+		printf("[");
+		if (!compact_mode) {
+			printf("\n");
+		}
+		indent_blanks += 2;
+		indent();
 		{
-			xbps_object_iterator_t	i;
-			xbps_object_t		o;
-			unsigned int		cnt, len;
+			unsigned int i, len;
 
-			for (cnt = 0, len = xbps_array_count(obj),
-			    i = xbps_array_iterator(obj);
-			    (o = xbps_object_iterator_next(i)) != NULL;
-			    cnt++) {
-				object_out(o, NULL);
-				if (cnt+1 < len)
-					(void)printf(",");
-				else
-					(void)printf(" ");
+			len = prop_array_count(obj);
+			for (i = 0; i < len; i++) {
+				prop_object_t o = prop_array_get(obj, i);
+				if (prop_object_type(o) == PROP_TYPE_DICTIONARY) {
+					parse(o, prop_dictionary_get_keysym(parent, obj));
+				} else {
+					parse(o, NULL);
+				}
+				if (i+1 < len) {
+					printf(",");
+					if (!compact_mode) {
+						printf("\n");
+					}
+					indent();
+				}
 			}
-			xbps_object_iterator_release(i);
 		}
-		(void)printf("]");
+		if (!compact_mode) {
+			printf("\n");
+		}
+		indent_blanks -= 2;
+		indent();
+		printf("]");
 		break;
-	case XBPS_TYPE_DICTIONARY:
-		(void)printf("{");
-		indent_level += 1;
+	case PROP_TYPE_DICTIONARY:
+		printf("{");
+		if (!compact_mode) {
+			printf("\n");
+		}
+		indent_blanks += 2;
+		indent();
 		{
-			xbps_object_iterator_t	i;
-			xbps_object_t		o;
-			unsigned int		cnt, len;
+			prop_array_t allkeys;
+			unsigned int i, len;
 
-			for (cnt = 0, len = xbps_dictionary_count(obj),
-			    i = xbps_dictionary_iterator(obj);
-			    (o = xbps_object_iterator_next(i)) != NULL;
-			    cnt++) {
-				object_out(o, obj);
-				if (cnt+1 < len)
-					(void)printf(",");
+			allkeys = prop_dictionary_all_keys(obj);
+			len = prop_array_count(allkeys);
+			for (i = 0; i < len; i++) {
+				prop_object_t keysym;
+				prop_array_t array;
+				const char *key;
+
+				keysym = prop_array_get(allkeys, i);
+				array = prop_dictionary_get_keysym(obj, keysym);
+				key = prop_dictionary_keysym_cstring_nocopy(keysym);
+				printf("\"%s\":", key);
+				if (!compact_mode) {
+					printf(" ");
+				}
+				parse(array, obj);
+				if (i+1 < len) {
+					printf(",");
+					if (!compact_mode) {
+						printf("\n");
+					}
+					indent();
+				}
 			}
-			xbps_object_iterator_release(i);
+			prop_object_release(allkeys);
 		}
-		indent_level -= 1;
-		indent_write(indent_level);
-		(void)printf("}");
+		if (!compact_mode) {
+			printf("\n");
+		}
+		indent_blanks -= 2;
+		indent();
+		printf("}");
 		break;
-	case XBPS_TYPE_DICT_KEYSYM:
-		indent_write(indent_level);
-		(void)printf("\"%s\": ",
-		    xbps_dictionary_keysym_cstring_nocopy(obj));
-		object_out(xbps_dictionary_get_keysym(parent, obj), NULL);
+	case PROP_TYPE_DICT_KEYSYM:
+		{
+			const char *key;
+
+			key = prop_dictionary_keysym_cstring_nocopy(obj);
+			parse(prop_dictionary_get(parent, key), NULL);
+		}
 		break;
-	case XBPS_TYPE_UNKNOWN:
-		break;
+	case PROP_TYPE_UNKNOWN:
+	default:
+		exit(EXIT_FAILURE);
 	}
 }
 
 int
 main(int argc, char **argv)
 {
-	xbps_object_t obj = NULL;
+	prop_object_t obj;
 
-	if (argc > 2)
-		err_usage(argv[0]);
-
+	if (argc > 2) {
+		usage(argv[0]);
+	}
 	if (argc == 1 || strcmp(argv[1], "-") == 0) {
 		char	*str;
 
 		str = string_read(STDIN_FILENO);
-		if ((obj = xbps_array_internalize(str)) == NULL &&
-		    (obj = xbps_dictionary_internalize(str)) == NULL)
-			err_invalid(argv[0], NULL);
+		if ((obj = prop_array_internalize(str)) == NULL &&
+		    (obj = prop_dictionary_internalize(str)) == NULL) {
+			perror("ERROR: invalid plist input");
+		}
 		free(str);
 	} else {
 		const char	*f;
 
 		f = argv[1];
-		if ((obj = xbps_array_internalize_from_file(f)) == NULL &&
-		    (obj = xbps_dictionary_internalize_from_file(f)) == NULL)
-			err_invalid(argv[0], f);
+		if ((obj = prop_array_internalize_from_file(f)) == NULL &&
+		    (obj = prop_dictionary_internalize_from_file(f)) == NULL) {
+			perror("ERROR: invalid plist file");
+		}
 	}
 
-	indent_init();
-	object_out(obj, NULL);
-	(void)printf("\n");
-	free(obj);
+	if (getenv("COMPACT_MODE")) {
+		compact_mode = true;
+	}
+	parse(obj, NULL);
+	printf("\n");
 
 	exit(EXIT_SUCCESS);
 }

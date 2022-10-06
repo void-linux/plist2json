@@ -1,21 +1,26 @@
-.Dd May 28, 2015
+.Dd January 11, 2020
 .Dt PLIST2JSON 1
 .Sh NAME
 .Nm plist2json
-.Nd Converts plist input to json
+.Nd Converts NetBSD's plist input to JSON
 .Sh SYNOPSYS
-.Nm plist2json [ files.plist | - ]
+.Nm plist2json [ file.plist | - ]
 .Sh DESCRIPTION
 The
 .Nm
-utility converts plist input to json. The plist input can be read from the
-specified file, or directly from stdin.
-The resulting json output is then printed to stdout.
+utility converts NetBSD's plist input to JSON.
+The plist input can be read from the specified file, or directly from stdin.
+The resulting JSON output is then printed to stdout.
 .Sh NOTES
 The plist format expected is not fully compatible with Apple plists, but rather
 it's compatible with the NetBSD's proplib implementation.
 .Sh AUTHORS
-.An Juan Romero Pardines <xtraeme@voidlinux.eu>
+.An Juan Romero Pardines <xtraeme@gmail.com>
+.Sh ENVIRONMENT
+.Bl -tag -width COMPACT_MODE
+.It Sy COMPACT_MODE
+Enable JSON compact mode, no indentation or blanks.
+.El
 .Sh BUGS
 Probably, but I try to make this not happen. Use it under your own
 responsability and enjoy your life.
